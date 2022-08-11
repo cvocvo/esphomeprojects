@@ -1,0 +1,268 @@
+#--------------------------------------------------------------------------------------------------------------
+#--------------------------------------------------------------------------------------------------------------
+#--This script is for the LilyGo TTGO T5 v2.2 2.9" screen board
+#--Board: https://www.aliexpress.com/item/2251832664072244.html
+#--Schematic: https://github.com/Xinyuan-LilyGO/LilyGo-T5-Epaper-Series/blob/master/schematic/T5V2.2.pdf
+#--Updated: 08-10-22
+#--Lots of resources commented below.
+#--------------------------------------------------------------------------------------------------------------
+#--------------------------------------------------------------------------------------------------------------
+
+substitutions:
+  esp_name: ESP Display #Device Name
+  esp_hostname: esp-display 
+  run_time: 5min #can be as long as needed to get data 
+  sleep_time: 5min # normal sleep time
+  night_sleep_time: 8h # long sleep time; 10pm to 6am, and 8am to 4pm MON-FRI
+  usb_power_refresh_interval: 60s #refresh quickly on USB power.
+
+esphome:
+  name: epaper29
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+# Enable logging
+logger:
+#  level: VERY_VERBOSE
+#  logs: 
+#      api: VERY_VERBOSE
+#      homeassistant: VERY_VERBOSE
+#      api.service: VERY_VERBOSE
+#      sensor: VERY_VERBOSE
+#      scheduler: DEBUG
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: !secret homeassistant_api_key
+
+ota:
+  password: !secret epaper29_ota_pwd
+
+spi:
+  clk_pin: 18
+  mosi_pin: 23
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  power_save_mode: high #most aggressive power saving, disconnects and turns off quickly after updating. https://esphome.io/components/wifi.html#wifi-power-save-mode
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: !secret epaper29_fallback_ssid
+    password: !secret epaper29_fallback_pwd
+
+deep_sleep:
+  run_duration: ${run_time} 
+  sleep_duration: ${sleep_time}
+  id: deep_sleep_1
+  esp32_ext1_wakeup:
+    pins: GPIO39      #This is the same as button 1 on the 4.7" T5 board; they have button 2 tied to GPIO 34 and button 3 tied to GPIO 35, but GPIO 35 on this board is (I think) the battery voltage, so these are likely different.
+    mode: ALL_LOW
+
+captive_portal:
+    
+font:
+  # gfonts://family[@weight]
+  - file: "gfonts://Roboto"
+    id: roboto
+    size: 20
+# gfonts://family[@weight]
+  - file: "gfonts://Roboto"
+    id: roboto16
+    size: 16
+  - file: "gfonts://Roboto"
+    id: roboto12
+    size: 12
+  - file: "gfonts://Roboto"
+    id: roboto10
+    size: 10
+  
+time:
+  - platform: homeassistant
+    id: ntp
+    
+binary_sensor:
+  - platform: gpio
+    internal: true
+    pin: 
+      number: GPIO39
+      inverted: true
+    name: "${esp_name} Button 1"
+    on_press:
+      then:
+       - component.update: t5_display
+  
+sensor:
+  - platform: homeassistant
+    entity_id: sensor.sensi_09efda_current_temperature_2
+    id: sensi_temp
+    internal: true
+  - platform: homeassistant
+    entity_id: sensor.zigbee_deep_freeze_110fa523_temperature
+    id: deepfreeze_temp
+    internal: true
+  - platform: homeassistant
+    entity_id: sensor.zigbee_garage_temp_temperature
+    id: garage_temp
+    internal: true
+    
+  - platform: adc   #Source: https://www.reddit.com/r/homeassistant/comments/rm71z4/lilygo_t5_epaper_display_now_using_esphome/ and https://gist.github.com/Plawasan/4ae826b05aaa7812f3a191714ca47a50
+    pin: GPIO35     #On the 4.7" T5 display, this pin is GPIO36; via experimentation I believe this is GPIO35 on the 2.9" v2.2 board.
+    name: "${esp_name} Battery Voltage"
+    id: batt_volt
+    attenuation: 11db
+    update_interval: never
+    filters:
+      - multiply: 2
+  - platform: template
+    name: "${esp_name} Battery"
+    id: batt
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    device_class: battery #the 4.1V below may not be 100% correct; it may be closer to 4.2V fully charged.
+    lambda: |-
+      int y = (1-(4.1-id(batt_volt).state)/(4.1-3.3))*100;
+      if (y < 100) {return y;} else {return 100;};
+    update_interval: never
+
+text_sensor:
+  - platform: homeassistant
+    entity_id: cover.garage_door
+    id: garage_door_status
+    internal: true
+  - platform: homeassistant
+    entity_id: alarm_control_panel.abode_alarm
+    id: abode_alarm
+    internal: true
+  - platform: homeassistant
+    entity_id: alarm_control_panel.blink_home
+    id: blink_status
+    internal: true
+    on_value: # Actions to perform once data for the last sensor has been received
+      then:
+        - script.execute: all_data_received
+
+script:
+  - id: all_data_received
+    mode: restart #https://esphome.io/guides/automations.html#script-component -- restart the script if a previous version is stuck running / running from USB power loop.
+    then:
+      - component.update: batt_volt
+      - component.update: batt
+      - component.update: t5_display
+      - if: 
+          condition: #Currently not working/not accurate. If charging, don't sleep via: https://gist.github.com/Plawasan/8e27956db016eb5158311b94d096509b#file-esp-display-yaml-L320 and https://gist.github.com/geekuillaume/f412c634637039f17a5bef2e588f5a33
+            lambda: |-
+              if (id(batt_volt).state > 4.3) { 
+                return false;
+              }
+              return true; 
+          then:    
+            - script.execute: enter_sleep
+          else:
+            - logger.log: "On USB power, preventing deep sleep, next refresh in {$usb_power_refresh_interval}"
+            - deep_sleep.prevent: deep_sleep_1
+            - delay: ${usb_power_refresh_interval}
+            - script.execute: all_data_received
+
+  - id: enter_sleep #TO-DO add better sleep mode support overnight, workday, usb power, no one home, etc. Examples: https://gist.github.com/Plawasan/8e27956db016eb5158311b94d096509b
+    then:
+      - if:
+          condition:
+            #pins below are usually 13 on the T5 v2.3 2.13" board: https://github.com/Xinyuan-LilyGO/LilyGo-T5-Epaper-Series/issues/3 and https://www.reddit.com/r/esp32/comments/idinjr/36ma_deep_sleep_in_an_eink_ttgo_t5_v23/
+            #however these are 16 on the T5 v2.2 2.9" board: https://github.com/Xinyuan-LilyGO/LilyGo-T5-Epaper-Series/issues/13 
+            #this extra pin setting is supposed to shut off the flash and save a tiny bit of power (~2mA)
+            #conditions below (can't easily add inline comments in lambda without pulling out into external class files)
+            #time isn't valid, keep it awake
+            #5:50am check -- the overnight sleep usually has some level of time drift. Maybe my RTC pin is wrong or something. This allows for 10min of drift when it wakes up so it doesn't sleep for an extra 8 hours.
+            #Mon-Friday 8am - 4pm check -- sleep the device during this time. This probably needs to be a bit better for a dynamic sleep time if it wakes up in the middle.
+            #Daily 10pm - 6am sleep
+            lambda: |- 
+              auto time = id(ntp).now();
+              if (!time.is_valid()) { 
+                return false;
+              }
+              if (time.hour == 5 && time.minute >= 50) {
+                return false;
+              }
+              if(time.day_of_week > 1 && time.day_of_week < 7){
+                if (time.hour >= 8 && time.hour < 5) {
+                  pinMode(16, OUTPUT);
+                  digitalWrite(16, HIGH);
+                  gpio_deep_sleep_hold_en();
+                  return true;
+                }
+              }
+              if (time.hour >= 22 || time.hour < 6) {
+                pinMode(16, OUTPUT);
+                digitalWrite(16, HIGH);
+                gpio_deep_sleep_hold_en();
+                return true;
+              }
+              return false;
+          then:
+            - logger.log: "It's nighttime, entering long sleep for ${night_sleep_time}"          
+            - deep_sleep.enter: 
+                id: deep_sleep_1 
+                sleep_duration: ${night_sleep_time}
+          else:
+            - logger.log: "It's daytime, entering short sleep for ${sleep_time}"             
+            - deep_sleep.enter: 
+                id: deep_sleep_1 
+                sleep_duration: ${sleep_time}
+
+#dimensions: 296px by 128px
+#full time:
+#      it.strftime(242, 115, id(roboto10), "%I:%M:%S%p", id(esptime).now());
+# TO-DO: build a better UI.
+display:
+  - platform: waveshare_epaper
+    id: t5_display
+    cs_pin: 5
+    dc_pin: 19
+    busy_pin: 4
+    reset_pin: 12
+    model: 2.90in
+    reset_duration: 200ms #it's 200ms by default, but this will keep it stable if that default changes.
+    update_interval: 2s #on the 4.7" display code this is "never", however, if I do that I end up with weird issues where the screen doesn't update properly. This seems to let it update a couple of times when it turns back on and a full reload happens.
+                        # I posted about the issue here: https://github.com/Xinyuan-LilyGO/LilyGo-T5-Epaper-Series/issues/30 and found a semi-related problem: https://github.com/esphome/issues/issues/2334
+    full_update_every: 72 #every 6 hours in 5 min updates; not sure this works/is necessary. The screen unfortunately does a full refresh when it comes out of deep sleep.
+    rotation: 270
+    lambda: |-
+      it.print(278,0,id(roboto10), "v33");
+      if(id(abode_alarm).has_state()) {
+        it.printf(0, 0, id(roboto16), "Abode: %s",id(abode_alarm).state.c_str());
+      } else {
+        it.printf(0, 0, id(roboto16), "Abode: No Status");
+      }
+      if(id(abode_alarm).has_state()) {
+        it.printf(0, 20, id(roboto16), "Blink: %s",id(blink_status).state.c_str());
+      } else {
+        it.printf(0, 20, id(roboto16), "Blink: No Status");
+      }
+      if(id(abode_alarm).has_state()) {
+        it.printf(0, 40, id(roboto16), "Garage Door: %s",id(garage_door_status).state.c_str());
+      } else {
+        it.printf(0, 40, id(roboto16), "Garage Door: No Status");
+      }
+      if(id(abode_alarm).has_state()) {
+        it.printf(0, 60, id(roboto16), "Thermostat: %.1f°F",id(sensi_temp).state);
+      } else {
+        it.printf(0, 60, id(roboto16), "Thermostat: No Status");
+      }
+      if(id(abode_alarm).has_state()) {
+        it.printf(0, 80, id(roboto16), "Deep Freeze: %.1f°F",id(deepfreeze_temp).state);
+      } else {
+        it.printf(0, 80, id(roboto16), "Deep Freeze: No Status");
+      }
+      if(id(abode_alarm).has_state()) {
+        it.printf(0, 100, id(roboto16), "Garage Temp: %.1f°F",id(garage_temp).state);
+      } else {
+        it.printf(0, 100, id(roboto16), "Garage Temp: No Status");
+      }
+      it.printf(230, 107, id(roboto10), "%.2fV/%.0f%%", id(batt_volt).state, id(batt).state);
+      it.strftime(200, 115, id(roboto10), "Updated: %I:%M:%S%p", id(ntp).now());
