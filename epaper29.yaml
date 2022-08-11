@@ -155,9 +155,9 @@ script:
       - component.update: batt
       - component.update: t5_display
       - if: 
-          condition: #Currently not working/not accurate. If charging, don't sleep via: https://gist.github.com/Plawasan/8e27956db016eb5158311b94d096509b#file-esp-display-yaml-L320 and https://gist.github.com/geekuillaume/f412c634637039f17a5bef2e588f5a33
+          condition: #Updated based on experimentation + battery manufacturer notes full charge is 4.1V. If charging, don't sleep via: https://gist.github.com/Plawasan/8e27956db016eb5158311b94d096509b#file-esp-display-yaml-L320 and https://gist.github.com/geekuillaume/f412c634637039f17a5bef2e588f5a33
             lambda: |-
-              if (id(batt_volt).state > 4.3) { 
+              if (id(batt_volt).state > 4.16) { 
                 return false;
               }
               return true; 
@@ -233,7 +233,7 @@ display:
     full_update_every: 72 #every 6 hours in 5 min updates; not sure this works/is necessary. The screen unfortunately does a full refresh when it comes out of deep sleep.
     rotation: 270
     lambda: |-
-      it.print(278,0,id(roboto10), "v33");
+      it.print(278,0,id(roboto10), "v34");
       if(id(abode_alarm).has_state()) {
         it.printf(0, 0, id(roboto16), "Abode: %s",id(abode_alarm).state.c_str());
       } else {
